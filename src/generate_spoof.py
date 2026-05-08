@@ -1,50 +1,104 @@
-import cv2
 import os
-import numpy as np
-from pathlib import Path
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras import layers
+from tensorflow.keras.applications import MobileNetV2
 
-real_dir = "/mnt/d/arpit/anti-spoof-face-verification/data/real"
-spoof_dir = "/mnt/d/arpit/anti-spoof-face-verification/data/spoof"
+# =========================
+# CONFIG
+# =========================
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 8
+EPOCHS = 10
 
-os.makedirs(spoof_dir, exist_ok=True)
+# =========================
+# PATHS (portable)
+# =========================
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-files = os.listdir(real_dir)
+print("Dataset path:", DATA_DIR)
 
-count = 0
+# =========================
+# DATA GENERATOR (with augmentation)
+# =========================
+datagen = ImageDataGenerator(
+    rescale=1.0 / 255,
+    validation_split=0.2,
 
-for file in files:
-    path = os.path.join(real_dir, file)
-    img = cv2.imread(path)
+    rotation_range=15,
+    zoom_range=0.2,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    horizontal_flip=True,
+    brightness_range=[0.8, 1.2]
+)
 
-    if img is None:
-        continue
+train_data = datagen.flow_from_directory(
+    DATA_DIR,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='binary',
+    subset='training',
+    shuffle=True
+)
 
-    h, w = img.shape[:2]
+val_data = datagen.flow_from_directory(
+    DATA_DIR,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='binary',
+    subset='validation',
+    shuffle=True
+)
 
-    # 1 Blur
-    blur = cv2.GaussianBlur(img, (15,15), 0)
+print("Class mapping:", train_data.class_indices)
 
-    # 2 Bright screen glare
-    bright = cv2.convertScaleAbs(img, alpha=1.2, beta=40)
+# =========================
+# MODEL (MobileNetV2)
+# =========================
+base_model = MobileNetV2(
+    input_shape=(224, 224, 3),
+    include_top=False,
+    weights='imagenet'
+)
 
-    # 3 Pixelated screen effect
-    small = cv2.resize(img, (w//4, h//4))
-    pixel = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+# Freeze base layers
+base_model.trainable = False
 
-    # 4 Rotated photo
-    M = cv2.getRotationMatrix2D((w//2,h//2), 8, 1)
-    rotate = cv2.warpAffine(img, M, (w,h))
+# Custom head
+x = base_model.output
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dense(128, activation='relu')(x)
+x = layers.Dropout(0.75)(x)
+output = layers.Dense(1, activation='sigmoid')(x)
 
-    # 5 Low quality jpeg
-    temp = "temp.jpg"
-    cv2.imwrite(temp, img, [cv2.IMWRITE_JPEG_QUALITY, 20])
-    lowq = cv2.imread(temp)
+model = tf.keras.Model(inputs=base_model.input, outputs=output)
 
-    variants = [blur, bright, pixel, rotate, lowq]
+model.compile(
+    optimizer='adam',
+    loss='binary_crossentropy',
+    metrics=['accuracy']
+)
 
-    for v in variants:
-        out = os.path.join(spoof_dir, f"spoof_{count}.jpg")
-        cv2.imwrite(out, v)
-        count += 1
+model.summary()
 
-print("Spoof images created:", count)
+# =========================
+# TRAIN
+# =========================
+history = model.fit(
+    train_data,
+    validation_data=val_data,
+    epochs=EPOCHS
+)
+
+# =========================
+# SAVE MODEL
+# =========================
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+model_path = os.path.join(MODEL_DIR, "anti_spoof_model.h5")
+model.save(model_path)
+
+print(f"Model saved at: {model_path}")
